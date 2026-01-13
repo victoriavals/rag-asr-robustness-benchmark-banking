@@ -1,0 +1,29 @@
+# Core Framework
+streamlit>=1.30.0
+
+# OpenAI API (Whisper, Embeddings, GPT-4o)
+openai>=1.12.0
+
+# Vector Database
+qdrant-client>=1.7.0
+
+# Evaluation Metrics
+scikit-learn>=1.4.0
+jiwer>=3.0.0
+
+# Configuration Management
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+
+# Audio Processing (for Whisper)
+pydub>=0.25.1
+soundfile>=0.12.0
+
+# HuggingFace Datasets (MINDS-14)
+datasets>=2.16.0
+
+# Utility Libraries
+numpy>=1.26.0
+pandas>=2.1.0
+plotly>=5.18.0
