@@ -111,10 +111,25 @@ QDRANT_COLLECTION=test-ai-nlp
 ```
 
 ### 4. Start Qdrant (Local Option)
+
+First, pull the Qdrant Docker image:
 ```bash
 docker pull qdrant/qdrant
-docker run -p 6333:6333 qdrant/qdrant
 ```
+
+Then, run Qdrant with persistent storage:
+```bash
+docker run -p 6333:6333 -p 6334:6334 -v "${pwd}/qdrant_storage:/qdrant/storage:z" qdrant/qdrant
+```
+
+**Qdrant is now accessible at:**
+| Service | URL |
+|---------|-----|
+| REST API | http://localhost:6333 |
+| Web UI Dashboard | http://localhost:6333/dashboard |
+| gRPC API | http://localhost:6334 |
+
+> **Note**: Data will be persisted in the `./qdrant_storage` directory.
 
 ### 5. Ingest Knowledge Base
 ```bash
