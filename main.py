@@ -94,7 +94,6 @@ def _render_sidebar() -> str:
             """
             <div style='text-align: center; color: gray; font-size: 12px;'>
                 Built with ❤️ using Streamlit<br>
-                Indonesia AI Final Project
             </div>
             """,
             unsafe_allow_html=True,

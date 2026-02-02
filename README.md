@@ -1,3 +1,8 @@
+> **Author:** Naufal Firdaus  
+> **Project:** UAS Matakuliah Deep Learning - AI NLP & RAG Systems
+
+---
+
 # RAG ASR Robustness Benchmark - Banking
 
 A comprehensive **RAG (Retrieval-Augmented Generation) system** with ASR (Automatic Speech Recognition) robustness benchmarking for banking domain. Features dual-mode operation: a Live Demo chatbot and a Research Lab for multi-accent evaluation.
