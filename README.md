@@ -1,333 +1,109 @@
-> **Author:** Naufal Firdaus  
-> **Project:** UAS Matakuliah Deep Learning - AI NLP & RAG Systems
+> Author: Naufal Firdaus
+>
+> Project: UAS Deep Learning — AI NLP and RAG Systems
 
----
+# Banking RAG and ASR Robustness Benchmark
 
-# RAG ASR Robustness Benchmark - Banking
+A Streamlit banking-policy assistant and a paired speech and retrieval benchmark using MINDS-14. SumoPod provides chat, embeddings, and speech transcription. Qdrant stores and searches the policy vectors.
 
-A comprehensive **RAG (Retrieval-Augmented Generation) system** with ASR (Automatic Speech Recognition) robustness benchmarking for banking domain. Features dual-mode operation: a Live Demo chatbot and a Research Lab for multi-accent evaluation.
+The Research Lab compares a reference transcript and its automatic speech recognition (ASR) transcript against the same Indonesian policy knowledge base. Retrieval scores count matches to chapter intent labels. Human reviewers score the generated answers separately. [Benchmark protocol](docs/benchmark_protocol.md)
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![Streamlit](https://img.shields.io/badge/streamlit-1.40+-red.svg)](https://streamlit.io/)
-[![OpenAI](https://img.shields.io/badge/OpenAI-GPT--4o-green.svg)](https://openai.com/)
-[![Qdrant](https://img.shields.io/badge/Qdrant-Vector%20DB-purple.svg)](https://qdrant.tech/)
+## Run locally
 
----
+### 1. Install dependencies
 
-## 🎯 Project Overview
+Use Python 3.12 and run these PowerShell commands from the repository root.
 
-This application provides:
-
-1. **Live Banking Assistant** - Interactive RAG-powered chatbot with text/voice input
-2. **Research Lab** - ASR benchmarking across English accents (US, GB, AU) using MINDS-14 dataset
-3. **Evaluation Metrics** - WER, Hit Rate, and Embedding Similarity analysis
-4. **Visualization** - Interactive Plotly charts for comparative analysis
-
----
-
-## 🌟 Key Features
-
-### Mode 1: Live Demo
-- 💬 **Chat Interface** with text and voice input
-- 🎤 **Whisper ASR** for voice transcription
-- 🔍 **RAG Pipeline** with context retrieval from Qdrant
-- 🤖 **GPT-4o** for intelligent responses
-- 📝 **Chat History** with session persistence
-
-### Mode 2: Research Lab
-
-#### Single Sample Analysis
-- Select from 14 languages in MINDS-14 dataset
-- Audio preview with ground truth transcription
-- Side-by-side comparison: Text baseline vs Voice experiment
-- Metrics: WER, Embedding Similarity, Retrieved Documents
-
-#### Batch Evaluation
-- Multi-accent analysis: 🇺🇸 en-US, 🇬🇧 en-GB, 🇦🇺 en-AU
-- Configurable sample size (5-100) or full dataset (1,809 samples)
-- Interactive Plotly visualizations:
-  - 📉 WER comparison bar chart
-  - 🎯 Text vs Voice hit rate (grouped bars)
-  - 📊 ASR degradation metrics
-  - 📋 Intent-level breakdown
-- CSV export for further analysis
-
----
-
-## 📊 Datasets
-
-### MINDS-14
-**Source**: [PolyAI/minds14](https://huggingface.co/datasets/PolyAI/minds14)
-
-| Property | Value |
-|----------|-------|
-| Languages | 14 (cs-CZ, de-DE, en-AU, en-GB, en-US, es-ES, fr-FR, it-IT, ko-KR, nl-NL, pl-PL, pt-PT, ru-RU, zh-CN) |
-| English Samples | en-US: 563, en-GB: 592, en-AU: 654 |
-| Audio Format | 8kHz WAV |
-| Intents | 14 (balance, pay_bill, card_issues, etc.) |
-
-### Banking Knowledge Base
-- **File**: `data/bank_policy.txt`
-- **Language**: Indonesian (Bahasa Indonesia)
-- **Content**: Neo Bank policies and FAQs
-
----
-
-## 🛠️ Tech Stack
-
-| Component | Technology |
-|-----------|-----------|
-| **Frontend** | Streamlit 1.40+ |
-| **LLM** | OpenAI GPT-4o |
-| **ASR** | OpenAI Whisper |
-| **Embeddings** | OpenAI text-embedding-3-small |
-| **Vector DB** | Qdrant |
-| **Visualization** | Plotly Express |
-| **Metrics** | jiwer (WER), scikit-learn (similarity) |
-| **Dataset** | HuggingFace Datasets |
-
----
-
-## 🚀 Quick Start
-
-### Prerequisites
-- Python 3.12+
-- OpenAI API Key
-- Qdrant instance (local Docker or Qdrant Cloud)
-
-### 1. Clone Repository
-```bash
-git clone https://github.com/victoriavals/rag-asr-robustness-benchmark-banking.git
-cd rag-asr-robustness-benchmark-banking
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+if (-not (Test-Path -LiteralPath '.env')) { Copy-Item -LiteralPath '.env.example' -Destination '.env' }
 ```
 
-### 2. Install Dependencies
-```bash
-pip install -r requirements.txt
+### 2. Configure SumoPod and Qdrant
+
+Set `API_KEY` in `.env` to your SumoPod key. The app uses that key for all model requests through `https://ai.sumopod.com/v1`. Restart Streamlit after changing settings. [Environment template](.env.example)
+
+| Setting | Default or example | Purpose |
+|---|---|---|
+| `MODEL` | `glm-5.3-flash` | Chat model. `CHAT_MODEL` takes precedence when both names are set. |
+| `LLM_TEMPERATURE`, `CHAT_MAX_TOKENS` | `0.7`, `1024` | Chat sampling temperature and maximum output tokens. |
+| `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | `text-embedding-3-small`, `1536` | Model and vector size used for indexing and retrieval. |
+| `EMBEDDING_SEND_DIMENSIONS` | `false` | Enable if the model accepts the optional `dimensions` parameter. The app validates the returned vector size in either case. |
+| `ASR_MODEL` | Empty | Exact transcription model ID enabled for your account and the `/v1/audio/transcriptions` endpoint. |
+| `QDRANT_URL`, `QDRANT_COLLECTION` | `http://localhost:6333`, `test-ai-nlp` | URL and logical collection from the example. The code defaults to `documents` if the collection setting is omitted. |
+| `QDRANT_API_KEY` | Empty | Set separately for an authenticated Qdrant cluster. Use an HTTP(S) URL without embedded credentials. |
+
+With `ASR_MODEL` blank, you can use text chat, preview samples in **Single Sample**, and inspect saved batch checkpoints. Voice input and speech experiments require a configured transcription model. Check the models and output dimensions enabled for your SumoPod account before running live requests. [SumoPod model selection](https://docs.sumopod.com/guides/ai/change-model)
+
+### 3. Start Qdrant, index the policy, and launch Streamlit
+
+For local Qdrant, use Docker to bind port 6333 to loopback and store data in `qdrant_storage/`. If you already have a Qdrant server, set `QDRANT_URL` and start at the ingestion command.
+
+```powershell
+docker run -d --name banking-qdrant -p 127.0.0.1:6333:6333 -v "${PWD}/qdrant_storage:/qdrant/storage" qdrant/qdrant
 ```
 
-### 3. Setup Environment Variables
+Restart an existing local container with `docker start banking-qdrant`. Once Qdrant is ready, index the policy and launch the app.
 
-Create `.env` file:
-```env
-OPENAI_API_KEY=your_openai_api_key_here
-QDRANT_URL=http://localhost:6333
-QDRANT_COLLECTION=test-ai-nlp
+```powershell
+.\.venv\Scripts\python.exe ingest_data.py
+.\.venv\Scripts\python.exe -m streamlit run main.py
 ```
 
-### 4. Start Qdrant (Local Option)
+Ingestion sends policy chunks to SumoPod for embedding. It indexes the bundled demonstration policy in `data/bank_policy.txt` by default and accepts a text file path as its first argument.
 
-First, pull the Qdrant Docker image:
-```bash
-docker pull qdrant/qdrant
+Open the local URL printed by Streamlit. The app binds to `127.0.0.1` and caps uploads at 25 MiB by default. Git ignores `.env`, the dataset audio cache, the default `results/` directory, and Qdrant storage. [Streamlit configuration](.streamlit/config.toml)
+
+## Application behavior
+
+| Workspace | How to use it |
+|---|---|
+| **Assistant** | Type a question or choose an example to fill the composer, then send it. Open **Sources** to read the passages supporting the answer. **Retry answer** and **Edit question** update the failed turn. With voice enabled, open **Voice input** and record a question. Transcription sends audio to SumoPod. Review or edit the draft, then select **Send question** to start retrieval. |
+| **Research Lab → Single Sample** | Pick a dataset locale and select **Load dataset**. Choose a sample, listen to its recording, and select **Run experiment** to compare the reference and ASR transcripts and their answers. The last successful result stays visible with its sample and timestamp if a later attempt fails. |
+| **Research Lab → Batch** | Choose locales and a sample cap, then select **Start batch evaluation**. The default is 28 samples per locale across `en-US`, `en-GB`, and `en-AU`. The main comparison uses trials with retrieval scores for both inputs. **Coverage and full summary** shows each input's denominator. |
+| **Research Lab → Review** | Choose the most recent successful chat answer or one of the two answers from the last successful single-sample experiment. Score source support, factual correctness, and relevance before selecting **Save review**. Each answer has its own draft. Use **Download reviews CSV** to keep a copy outside the session. |
+
+Model, database, and dataset requests start on explicit actions. Select **Refresh database status** to check Qdrant. Loading a dataset or starting a batch can download uncached MINDS-14 data. Each batch trial can send up to one transcription request and two embedding requests.
+
+These screenshots show the interface with local fixtures. [Mobile assistant](docs/qa/assistant-mobile.png) · [Single-sample comparison](docs/qa/single-sample-comparison.png)
+
+### Safe ingestion and existing collections
+
+Ingestion validates the input and builds the embeddings before creating a staging collection. After upsert and point-count validation, one alias update activates the new collection through `<QDRANT_COLLECTION>__active`.
+
+Reads resolve the active alias first and fall back to the legacy collection when the alias is absent. Failed staging collections and previously active collections remain available for inspection. The CLI returns a nonzero exit code on failure.
+
+If the sidebar reports incompatible embedding provenance, model, dimension, or distance, check your embedding settings and rerun ingestion. This also adds stable IDs, intent labels, and knowledge-base version metadata to a legacy index. Select **Refresh database status** after the new collection activates.
+
+### Checkpoints and resume
+
+Each run uses a folder under `RESULTS_DIR`, which defaults to `results/`. Keep `trials.jsonl` and `trials.manifest.json` together for recovery. Trial records are flushed before progress updates. The manifest stores the dataset revision, selected IDs and audio hashes, model settings, and knowledge-base snapshot. For analysis, download the trial CSV and manifest from the results panel. The current run and **Previous valid results** have separate export buttons.
+
+1. An active batch keeps running when you switch views in the same session. Once trials are running, select **Stop after current trial** to pause at a checkpoint.
+2. In a new session, open **Advanced settings and recovery** in **Batch**, check **Resume an existing run**, enter the `trials.jsonl` path on the Streamlit machine, and select **Inspect saved checkpoint**. Inspection reads the local run files and works without a model key.
+3. Select **Resume pending trials with saved setup** for an interrupted run. Resume uses the saved locales, sample cap, and seed, checks compatibility, and skips all recorded trials, including failures.
+
+Use **Start a new replication** to repeat recorded trials deliberately. Start a new run after changing the dataset revision, model settings, sample selection, or knowledge base. Concurrent runs on one checkpoint are blocked. After an abrupt interruption, a request accepted by the provider before its trial was recorded may run again. [Checkpoint and measurement details](docs/benchmark_protocol.md#provenance-persistence-and-answer-review)
+
+The dataset is pinned to an immutable revision. Set `DATASET_REVISION` to a full commit SHA to choose another revision. If you export `HF_HUB_OFFLINE=1` or `HF_DATASETS_OFFLINE=1` in the shell, the loader requires an existing Arrow cache for the selected locale and revision. A speech experiment still uses the configured SumoPod and Qdrant services.
+
+## Offline verification
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -B -m pytest -q -p no:cacheprovider
 ```
 
-Then, run Qdrant with persistent storage:
-```bash
-docker run -p 6333:6333 -p 6334:6334 -v "${pwd}/qdrant_storage:/qdrant/storage:z" qdrant/qdrant
-```
+The tests use isolated settings and block socket connections and DNS. They exercise Streamlit AppTest, simulated SumoPod HTTP responses, and Qdrant in memory. The latest local run passed **254 tests**. [QA evidence and coverage](docs/QA.md)
 
-**Qdrant is now accessible at:**
-| Service | URL |
-|---------|-----|
-| REST API | http://localhost:6333 |
-| Web UI Dashboard | http://localhost:6333/dashboard |
-| gRPC API | http://localhost:6334 |
+Dependencies are pinned in `requirements.txt` and `requirements-dev.txt`. To refresh the pins after a deliberate upgrade, run `python scripts/lock_dependencies.py` in the tested environment and rerun the suite. The workflow defines Windows and Ubuntu jobs using Python 3.12. [CI workflow](.github/workflows/tests.yml)
 
-> **Note**: Data will be persisted in the `./qdrant_storage` directory.
+## Source layout
 
-### 5. Ingest Knowledge Base
-```bash
-python ingest_data.py
-```
+- `main.py` and `src/tabs/` implement navigation, chat, transcript drafts, the batch worker, and manual review.
+- `src/config.py` and `src/sumopod_services.py` handle validated settings and model requests.
+- `ingest_data.py`, `src/knowledge_base.py`, and `src/vector_db.py` build and query the policy index.
+- `src/minds14_loader.py`, `src/metrics.py`, and `src/evaluation_engine.py` handle dataset loading, scoring, paired evaluation, and checkpoints.
 
-### 6. Run Application
-```bash
-streamlit run main.py
-```
-
-Open browser at `http://localhost:8501`
-
----
-
-## 📁 Project Structure
-
-```
-rag-asr-robustness-benchmark-banking/
-├── .env                          # Environment variables (not in git)
-├── requirements.txt              # Python dependencies
-├── main.py                       # Streamlit app entry point
-├── ingest_data.py                # Knowledge base ingestion script
-├── data/
-│   ├── bank_policy.txt           # Banking knowledge base
-│   └── minds14/                  # Cached MINDS-14 audio files
-└── src/
-    ├── config.py                 # Pydantic environment config
-    ├── openai_services.py        # OpenAI API wrappers
-    ├── vector_db.py              # Qdrant operations with retry logic
-    ├── minds14_loader.py         # MINDS-14 dataset loader
-    ├── evaluation_engine.py      # WER & Hit Rate metrics
-    └── tabs/
-        ├── live_demo.py          # Live chat interface
-        └── research_lab.py       # Batch evaluation & charts
-```
-
----
-
-## 📈 Evaluation Metrics
-
-### Word Error Rate (WER)
-```
-WER = (Substitutions + Insertions + Deletions) / Total Words
-```
-- **0%** = Perfect transcription
-- **Lower is better**
-
-### Retrieval Hit Rate
-```
-Hit = 1 if any(intent_keyword in retrieved_docs) else 0
-Hit Rate = sum(hits) / total_samples × 100%
-```
-- Measures if retrieval is relevant to intent
-- **Higher is better**
-
-### ASR Degradation
-```
-Degradation = Text Hit Rate - Voice Hit Rate
-```
-- Shows how ASR errors impact retrieval
-- **Lower is better**
-
----
-
-## 🎨 Screenshots
-
-### Live Demo
-Chat interface with text and voice input, powered by RAG.
-
-### Research Lab - Single Sample
-Side-by-side comparison showing WER and embedding similarity.
-
-### Research Lab - Batch Evaluation
-Interactive charts comparing ASR performance across accents.
-
----
-
-## 🔧 Configuration
-
-### OpenAI Models
-- **LLM**: `gpt-4o`
-- **Embeddings**: `text-embedding-3-small`
-- **ASR**: `whisper-1`
-
-### Qdrant Settings
-- **Vector Size**: 1536 (OpenAI embedding dimension)
-- **Distance Metric**: Cosine
-- **Collection**: Configurable via `.env`
-
----
-
-## 📝 Usage Examples
-
-### Live Demo Mode
-1. Select **Mode 1: Live Banking Assistant**
-2. Type question or record voice
-3. Receive AI-powered response with context
-
-### Research Lab - Single Sample
-1. Select **Mode 2: Research Lab** → **Single Sample Analysis**
-2. Choose language (e.g., en-US)
-3. Select sample index
-4. Click **Run Experiment**
-5. View WER, similarity, and retrieved docs
-
-### Research Lab - Batch Evaluation
-1. Select **Mode 2: Research Lab** → **Batch Evaluation**
-2. Choose locales (en-US, en-GB, en-AU)
-3. Set sample size or use full dataset
-4. Click **Start Multi-Region Analysis**
-5. View interactive charts and download CSV
-
----
-
-## 🐛 Troubleshooting
-
-### Qdrant Connection Error
-```
-WinError 10061: No connection could be made
-```
-
-**Solutions**:
-1. **Start Qdrant locally**:
-   ```bash
-   docker run -p 6333:6333 qdrant/qdrant
-   ```
-
-2. **Use Qdrant Cloud** (free tier):
-   - Sign up at [cloud.qdrant.io](https://cloud.qdrant.io/)
-   - Update `QDRANT_URL` in `.env`
-
-3. **Verify connection**:
-   - Visit `http://localhost:6333/dashboard`
-
-### FFmpeg/torchcodec Error
-Audio decoding is configured to use `soundfile` instead of `torchcodec`, avoiding FFmpeg dependency issues on Windows.
-
----
-
-## 📦 Dependencies
-
-Core libraries:
-- `streamlit>=1.40.0` - Web UI
-- `openai>=1.0.0` - GPT-4o, Whisper, Embeddings
-- `qdrant-client>=1.16.0` - Vector database
-- `datasets>=2.14.0` - HuggingFace datasets
-- `jiwer>=3.0.0` - WER calculation
-- `plotly>=5.18.0` - Interactive charts
-- `pandas>=2.1.0` - Data analysis
-- `pydantic-settings>=2.0.0` - Environment config
-
-See [requirements.txt](requirements.txt) for full list.
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-## 🙏 Acknowledgments
-
-- **OpenAI** for GPT-4o, Whisper, and Embeddings APIs
-- **Qdrant** for vector database
-- **PolyAI** for MINDS-14 dataset
-- **Streamlit** for the amazing web framework
-- **HuggingFace** for datasets library
-
----
-
-## 📧 Contact
-
-For questions or feedback, please open an issue on GitHub.
-
----
-
-## 🔗 Links
-
-- [MINDS-14 Dataset](https://huggingface.co/datasets/PolyAI/minds14)
-- [Qdrant Documentation](https://qdrant.tech/documentation/)
-- [OpenAI API Reference](https://platform.openai.com/docs/api-reference)
-- [Streamlit Documentation](https://docs.streamlit.io/)
+Code is available under the [MIT License](LICENSE). MINDS-14 is supplied separately. Consult its dataset card for usage terms and provenance. [PolyAI/minds14](https://huggingface.co/datasets/PolyAI/minds14)
