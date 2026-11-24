@@ -1,37 +1,22 @@
-"""
-MINDS-14 Dataset Loader for the Dual-Mode RAG Application.
-
-This module provides functions to load and manage the MINDS-14 dataset
-from HuggingFace for ASR benchmarking experiments.
-
-Dataset: https://huggingface.co/datasets/PolyAI/minds14
-"""
-
+﻿"""Pinned MINDS-14 loading with content-verified, revision-aware audio caching."""
+import hashlib
 import os
+import tempfile
 from io import BytesIO
 from pathlib import Path
 from typing import TypedDict
 
 import soundfile as sf
-from datasets import load_dataset, Dataset
+from datasets import Audio, Dataset, DownloadConfig, load_dataset
+from src.knowledge_base import INTENT_NAMES
+from src.config import get_settings
+
+DEFAULT_DATASET_REVISION = "40ce77cb32a384e4d50a568e1ec39ac804019d33"
 
 
 class MINDS14Sample(TypedDict):
-    """
-    Represents a single sample from the MINDS-14 dataset.
-
-    Attributes:
-        id (str): Unique identifier for the sample.
-        audio_path (str): Path to the saved audio file.
-        audio_array (list[float]): Raw audio data as float array.
-        sampling_rate (int): Audio sampling rate in Hz.
-        transcription (str): Original language transcription.
-        english_transcription (str): English translation of transcription.
-        intent_class (int): Intent class ID.
-        intent_name (str): Human-readable intent name.
-    """
-
     id: str
+    source_id: str
     audio_path: str
     audio_array: list[float]
     sampling_rate: int
@@ -39,245 +24,124 @@ class MINDS14Sample(TypedDict):
     english_transcription: str
     intent_class: int
     intent_name: str
-
-
-# Intent class names from MINDS-14 dataset
-INTENT_NAMES: list[str] = [
-    "abroad",
-    "address",
-    "app_error",
-    "atm_limit",
-    "balance",
-    "business_loan",
-    "card_issues",
-    "cash_deposit",
-    "direct_debit",
-    "freeze",
-    "high_value_payment",
-    "joint_account",
-    "latest_transactions",
-    "pay_bill",
-]
+    dataset_revision: str
+    audio_sha256: str
 
 
 class MINDS14Loader:
-    """
-    Loader class for the MINDS-14 dataset.
-
-    Handles downloading, caching, and accessing samples from the
-    HuggingFace MINDS-14 dataset for ASR benchmarking.
-
-    Attributes:
-        language (str): Language code (e.g., 'en-US', 'id-ID').
-        dataset (Dataset): The loaded HuggingFace dataset.
-        cache_dir (Path): Directory for caching audio files.
-    """
-
-    def __init__(
-        self,
-        language: str = "en-US",
-        cache_dir: str = "data/minds14",
-    ) -> None:
-        """
-        Initialize the MINDS-14 dataset loader.
-
-        Params:
-            language (str): Language code to load. Default is 'en-US'.
-                Available: cs-CZ, de-DE, en-AU, en-GB, en-US, es-ES,
-                fr-FR, it-IT, ko-KR, nl-NL, pl-PL, pt-PT, ru-RU, zh-CN.
-            cache_dir (str): Directory to cache audio files.
-
-        Returns:
-            None
-        """
-        self.language: str = language
-        self.cache_dir: Path = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
+    def __init__(self, language: str = "en-US", cache_dir: str = "data/minds14",
+                 revision: str | None = None, offline: bool | None = None) -> None:
+        if language not in get_available_languages():
+            raise ValueError(f"Unsupported MINDS-14 locale: {language}")
+        self.language = language
+        self.revision = revision or get_settings().dataset_revision
+        if len(self.revision) != 40 or any(c not in "0123456789abcdef" for c in self.revision.lower()):
+            raise ValueError("MINDS14 revision must be an immutable 40-character commit SHA")
+        self.offline = offline
+        self.cache_dir = Path(cache_dir)
         self._dataset: Dataset | None = None
 
     def load(self) -> None:
-        """
-        Load the dataset from HuggingFace.
-
-        Downloads the dataset if not cached locally.
-        Disables automatic audio decoding to avoid FFmpeg/torchcodec
-        dependency issues on Windows.
-
-        Params:
-            None
-
-        Returns:
-            None
-        """
-        from datasets import Audio
-
-        print(f"Loading MINDS-14 dataset for language: {self.language}")
-
-        # Load dataset with audio decoding disabled to avoid torchcodec issues
-        dataset = load_dataset(
-            "PolyAI/minds14",
-            self.language,
-            split="train",
-            trust_remote_code=True,
-        )
-
-        # Disable automatic audio decoding - we'll handle it manually with soundfile
-        self._dataset = dataset.cast_column(
-            "audio",
-            Audio(decode=False),
-        )
-        print(f"Loaded {len(self._dataset)} samples")
+        offline = bool(self.offline) or any(os.environ.get(k, "").lower() in {"1", "true", "yes"}
+                    for k in ("HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE"))
+        if offline:
+            from datasets import config as datasets_config
+            root = Path(os.environ.get('HF_DATASETS_CACHE', str(datasets_config.HF_DATASETS_CACHE)))
+            cached = sorted((root/'PolyAI___minds14'/self.language).glob(
+                f'*/{self.revision}/minds14-train.arrow'))
+            if not cached:
+                raise FileNotFoundError('Pinned MINDS-14 locale is not cached offline; preload this revision first')
+            dataset = Dataset.from_file(str(cached[0]))
+        else:
+            dataset = load_dataset("PolyAI/minds14", self.language, split="train", revision=self.revision,
+                                   download_config=DownloadConfig(local_files_only=False))
+        labels = list(dataset.features["intent_class"].names)
+        if set(labels) != set(INTENT_NAMES) or len(labels) != len(INTENT_NAMES):
+            raise ValueError("MINDS-14 intent metadata does not match supported labels")
+        self._dataset = dataset.cast_column("audio", Audio(decode=False))
 
     @property
     def dataset(self) -> Dataset:
-        """
-        Get the loaded dataset, loading it if necessary.
-
-        Params:
-            None
-
-        Returns:
-            Dataset: The loaded HuggingFace dataset.
-        """
         if self._dataset is None:
             self.load()
         return self._dataset
 
+    @property
+    def intent_labels(self) -> list[str]:
+        features = getattr(self.dataset, "features", {})
+        feature = features.get("intent_class") if features else None
+        return list(feature.names) if feature is not None else list(INTENT_NAMES)
+
+    def get_intent_classes(self) -> list[int]:
+        try:
+            classes = list(self.dataset["intent_class"])
+        except (TypeError, KeyError):
+            classes = [row["intent_class"] for row in self.dataset]
+        labels = self.intent_labels
+        result = []
+        for value in classes:
+            if isinstance(value,bool) or not isinstance(value, int) or not 0 <= value < len(labels):
+                raise ValueError(f"Invalid MINDS-14 intent class: {value}")
+            result.append(INTENT_NAMES.index(labels[value]))
+        return result
+
     def __len__(self) -> int:
-        """
-        Get the number of samples in the dataset.
-
-        Params:
-            None
-
-        Returns:
-            int: Number of samples.
-        """
         return len(self.dataset)
 
-    def get_sample(self, index: int) -> MINDS14Sample:
-        """
-        Get a single sample from the dataset.
-
-        Params:
-            index (int): Index of the sample to retrieve.
-
-        Returns:
-            MINDS14Sample: The sample data including audio and transcription.
-
-        Raises:
-            IndexError: If index is out of range.
-        """
-        if index < 0 or index >= len(self.dataset):
+    def get_sample(self, index: int, *, decode_audio: bool = True) -> MINDS14Sample:
+        if not 0 <= index < len(self.dataset):
             raise IndexError(f"Index {index} out of range [0, {len(self.dataset)})")
-
         item = self.dataset[index]
-
-        # Generate sample ID
-        sample_id: str = f"{self.language}_sample_{index:04d}"
-
-        # Audio path for caching
-        audio_path: Path = self.cache_dir / f"{sample_id}.wav"
-
-        # Extract audio data - since decode=False, audio is a dict with 'path' and 'bytes'
-        audio_info = item["audio"]
-
-        if not audio_path.exists():
-            # Get raw audio bytes from the dataset
-            if "bytes" in audio_info and audio_info["bytes"] is not None:
-                # Audio is stored as bytes
-                audio_bytes: bytes = audio_info["bytes"]
-                with open(audio_path, "wb") as f:
-                    f.write(audio_bytes)
-            elif "path" in audio_info and audio_info["path"] is not None:
-                # Audio is stored as a file path - copy it
-                import shutil
-                shutil.copy(audio_info["path"], audio_path)
-
-        # Read audio file with soundfile to get array and sampling rate
-        audio_array_np, sampling_rate = sf.read(str(audio_path))
-        audio_array: list[float] = audio_array_np.tolist()
-
-        # Get intent name
-        intent_class: int = item["intent_class"]
-        intent_name: str = (
-            INTENT_NAMES[intent_class]
-            if intent_class < len(INTENT_NAMES)
-            else f"unknown_{intent_class}"
-        )
-
-        sample: MINDS14Sample = {
-            "id": sample_id,
-            "audio_path": str(audio_path),
-            "audio_array": audio_array,
-            "sampling_rate": int(sampling_rate),
-            "transcription": item["transcription"],
-            "english_transcription": item.get("english_transcription", ""),
-            "intent_class": intent_class,
-            "intent_name": intent_name,
-        }
-
-        return sample
+        raw_class = item["intent_class"]
+        labels = self.intent_labels
+        if isinstance(raw_class,bool) or not isinstance(raw_class, int) or not 0 <= raw_class < len(labels):
+            raise ValueError(f"Invalid MINDS-14 intent class: {raw_class}")
+        intent_name = labels[raw_class]
+        if intent_name not in INTENT_NAMES:
+            raise ValueError(f"Unsupported intent label: {intent_name}")
+        info = item["audio"]
+        raw = info.get("bytes")
+        if raw is None and info.get("path"):
+            raw = Path(info["path"]).read_bytes()
+        if not isinstance(raw, bytes) or not raw:
+            raise ValueError(f"MINDS-14 sample {index} has no audio bytes or readable path")
+        digest = hashlib.sha256(raw).hexdigest()
+        source_id = str(item.get("id") or item.get("path") or info.get("path") or f"row-{index}")
+        stable_id = hashlib.sha256(source_id.replace("\\", "/").encode()).hexdigest()[:16]
+        sample_id = f"{self.language}_{stable_id}"
+        audio_path = self.cache_dir / self.revision / f"{sample_id}_{digest}.wav"
+        try:
+            audio_info = sf.info(BytesIO(raw))
+            array = sf.read(BytesIO(raw))[0].tolist() if decode_audio else []
+        except (RuntimeError, ValueError) as exc:
+            raise ValueError(f"Invalid audio for MINDS-14 sample {sample_id}") from exc
+        if not audio_path.exists() or hashlib.sha256(audio_path.read_bytes()).hexdigest() != digest:
+            audio_path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=audio_path.parent, suffix=".tmp", delete=False) as f:
+                temp_path = Path(f.name)
+                f.write(raw)
+            try:
+                temp_path.replace(audio_path)
+            finally:
+                temp_path.unlink(missing_ok=True)
+        return MINDS14Sample(id=sample_id, source_id=source_id, audio_path=str(audio_path), audio_array=array,
+            sampling_rate=int(audio_info.samplerate), transcription=item["transcription"],
+            english_transcription=item.get("english_transcription", ""), intent_class=INTENT_NAMES.index(intent_name),
+            intent_name=intent_name, dataset_revision=self.revision, audio_sha256=digest)
 
     def get_sample_list(self, limit: int = 10) -> list[MINDS14Sample]:
-        """
-        Get a list of samples from the dataset.
+        if limit < 0:
+            raise ValueError("Sample limit cannot be negative")
+        return [self.get_sample(i) for i in range(min(limit, len(self)))]
 
-        Params:
-            limit (int): Maximum number of samples to retrieve.
-
-        Returns:
-            list[MINDS14Sample]: List of sample data.
-        """
-        samples: list[MINDS14Sample] = []
-        for i in range(min(limit, len(self.dataset))):
-            samples.append(self.get_sample(i))
-        return samples
-
-    def get_audio_bytes(self, index: int) -> BytesIO:
-        """
-        Get audio data as BytesIO buffer for Whisper API.
-
-        Params:
-            index (int): Index of the sample.
-
-        Returns:
-            BytesIO: Audio data as BytesIO buffer.
-        """
-        sample: MINDS14Sample = self.get_sample(index)
-        audio_path: Path = Path(sample["audio_path"])
-
-        with open(audio_path, "rb") as f:
-            audio_bytes: BytesIO = BytesIO(f.read())
-            audio_bytes.name = audio_path.name
-
-        return audio_bytes
+    def get_audio_bytes(self, index: int, sample: MINDS14Sample | None = None) -> BytesIO:
+        sample = sample or self.get_sample(index, decode_audio=False)
+        path = Path(sample["audio_path"])
+        buffer = BytesIO(path.read_bytes())
+        buffer.name = path.name
+        return buffer
 
 
 def get_available_languages() -> list[str]:
-    """
-    Get list of available languages in MINDS-14 dataset.
-
-    Params:
-        None
-
-    Returns:
-        list[str]: List of language codes.
-    """
-    return [
-        "cs-CZ",  # Czech
-        "de-DE",  # German
-        "en-AU",  # English (Australia)
-        "en-GB",  # English (UK)
-        "en-US",  # English (US)
-        "es-ES",  # Spanish
-        "fr-FR",  # French
-        "it-IT",  # Italian
-        "ko-KR",  # Korean
-        "nl-NL",  # Dutch
-        "pl-PL",  # Polish
-        "pt-PT",  # Portuguese
-        "ru-RU",  # Russian
-        "zh-CN",  # Chinese
-    ]
+    return ["cs-CZ", "de-DE", "en-AU", "en-GB", "en-US", "es-ES", "fr-FR",
+            "it-IT", "ko-KR", "nl-NL", "pl-PL", "pt-PT", "ru-RU", "zh-CN"]
