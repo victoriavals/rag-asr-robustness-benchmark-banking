@@ -1,133 +1,102 @@
-"""
-Configuration module for the Dual-Mode RAG Application.
-
-This module uses pydantic-settings to load and validate environment variables
-from a .env file. It ensures that all required API keys and configuration
-values are present before the application starts.
-"""
-
-from pydantic import Field, field_validator
+"""Validated, lazy configuration; importing the app never requires credentials."""
+from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+from urllib.parse import urlsplit
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATASET_REVISION = '40ce77cb32a384e4d50a568e1ec39ac804019d33'
+SUMOPOD_BASE_URL = 'https://ai.sumopod.com/v1'
+SUMOPOD_CHAT_MODEL = 'glm-5.3-flash'
+ServicePurpose = Literal['embedding', 'asr', 'chat']
 
 class Settings(BaseSettings):
-    """
-    Application settings loaded from environment variables.
+    model_config = SettingsConfigDict(env_file=PROJECT_ROOT / '.env', env_file_encoding='utf-8',
+        case_sensitive=False, extra='ignore', populate_by_name=True, hide_input_in_errors=True)
+    api_key: SecretStr | None = None
+    chat_model: str = Field(default=SUMOPOD_CHAT_MODEL, validation_alias=AliasChoices('CHAT_MODEL', 'MODEL'))
+    embedding_model: str = 'text-embedding-3-small'
+    embedding_dimensions: int = Field(default=1536, ge=1, le=3072)
+    embedding_send_dimensions: bool = False
+    asr_model: str | None = None
+    llm_temperature: float = Field(default=0.7, ge=0, le=2)
+    chat_max_tokens: int = Field(default=1024, ge=1)
+    request_timeout_seconds: float = Field(default=30, gt=0, le=600)
+    max_audio_bytes: int = Field(default=25*1024*1024, ge=1, le=25*1024*1024)
+    max_history_messages: int = Field(default=12, ge=0, le=50)
+    max_context_chars: int = Field(default=24000, ge=100, le=100000)
+    qdrant_url: str = 'http://localhost:6333'
+    qdrant_api_key: SecretStr | None = None
+    qdrant_collection: str = 'documents'
+    retrieval_top_k: int = Field(default=3, ge=1, le=20)
+    retrieval_score_threshold: float | None = Field(default=None, ge=-1, le=1)
+    evaluation_seed: int = 42
+    dataset_revision: str = Field(default=DATASET_REVISION,
+        validation_alias=AliasChoices('DATASET_REVISION', 'MINDS14_REVISION'))
+    results_dir: Path = Path('results')
 
-    This class validates that all required configuration values exist
-    and provides type-safe access to environment variables.
+    def provider_address(self, purpose: ServicePurpose) -> str:
+        """Return the fixed gateway recorded in retrieval and benchmark provenance."""
+        return SUMOPOD_BASE_URL
 
-    Attributes:
-        openai_api_key (str): The OpenAI API key for Whisper, Embeddings, and GPT-4o.
-        qdrant_url (str): The URL of the Qdrant vector database instance.
-        qdrant_collection (str): The name of the Qdrant collection to use.
-    """
-
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="ignore",
-    )
-
-    openai_api_key: str = Field(
-        ...,
-        description="OpenAI API key for Whisper, Embeddings, and GPT-4o",
-    )
-    qdrant_url: str = Field(
-        default="http://localhost:6333",
-        description="URL of the Qdrant vector database instance",
-    )
-    qdrant_collection: str = Field(
-        default="documents",
-        description="Name of the Qdrant collection",
-    )
-
-    @field_validator("openai_api_key")
+    @field_validator('api_key', 'qdrant_api_key', mode='before')
     @classmethod
-    def validate_openai_api_key(cls, value: str) -> str:
-        """
-        Validate that the OpenAI API key is not empty or a placeholder.
+    def normalize_secret(cls, value):
+        if isinstance(value, SecretStr):
+            value = value.get_secret_value()
+        if value is None:
+            return None
+        value = str(value).strip()
+        placeholders = {'', 'api', 'api_key', 'your_api_key', 'your-api-key',
+                        'your_qdrant_api_key_here', 'your_sumopod_api_key_here', 'sk-xxx'}
+        return None if value.lower() in placeholders else value
 
-        Params:
-            value (str): The OpenAI API key value to validate.
-
-        Returns:
-            str: The validated API key.
-
-        Raises:
-            ValueError: If the API key is empty or contains a placeholder value.
-        """
-        if not value or value.strip() == "":
-            raise ValueError("OPENAI_API_KEY cannot be empty")
-        if value in ("api_key", "your_api_key", "your-api-key", "sk-xxx"):
-            raise ValueError(
-                "OPENAI_API_KEY appears to be a placeholder. "
-                "Please set a valid API key."
-            )
+    @field_validator('qdrant_url', mode='before')
+    @classmethod
+    def validate_url(cls, value):
+        if value is None or not str(value).strip():
+            return None
+        value = str(value).strip().rstrip('/')
+        try:
+            parsed = urlsplit(value)
+            valid = (parsed.scheme in {'http', 'https'} and parsed.hostname
+                and not any(char.isspace() for char in value)
+                and parsed.username is None and parsed.password is None and not parsed.query and not parsed.fragment)
+            parsed.port
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError('Use an HTTP(S) URL with a valid host and no embedded credentials')
         return value
 
-    @field_validator("qdrant_url")
+    @field_validator('qdrant_url')
     @classmethod
-    def validate_qdrant_url(cls, value: str) -> str:
-        """
-        Validate that the Qdrant URL is properly formatted.
-
-        Params:
-            value (str): The Qdrant URL to validate.
-
-        Returns:
-            str: The validated Qdrant URL.
-
-        Raises:
-            ValueError: If the URL is empty or not properly formatted.
-        """
-        if not value or value.strip() == "":
-            raise ValueError("QDRANT_URL cannot be empty")
-        if not value.startswith(("http://", "https://")):
-            raise ValueError(
-                "QDRANT_URL must start with http:// or https://"
-            )
+    def require_qdrant_url(cls, value):
+        if value is None:
+            raise ValueError('QDRANT_URL cannot be empty')
         return value
 
-    @field_validator("qdrant_collection")
+    @field_validator('qdrant_collection', 'chat_model', 'embedding_model', 'dataset_revision')
     @classmethod
-    def validate_qdrant_collection(cls, value: str) -> str:
-        """
-        Validate that the Qdrant collection name is not empty.
-
-        Params:
-            value (str): The Qdrant collection name to validate.
-
-        Returns:
-            str: The validated collection name.
-
-        Raises:
-            ValueError: If the collection name is empty.
-        """
-        if not value or value.strip() == "":
-            raise ValueError("QDRANT_COLLECTION cannot be empty")
+    def nonempty_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value or any(char in value for char in '\r\n\x00'):
+            raise ValueError('Configuration must be nonempty and contain no control characters')
         return value
 
+    @field_validator('asr_model')
+    @classmethod
+    def validate_asr_model(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        return cls.nonempty_text(value)
 
+    def public_metadata(self) -> dict:
+        return {name: getattr(self, name) for name in ('chat_model', 'embedding_model', 'embedding_dimensions',
+            'asr_model', 'llm_temperature', 'retrieval_top_k', 'retrieval_score_threshold', 'evaluation_seed', 'dataset_revision')}
+
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """
-    Create and return a Settings instance.
-
-    This function loads the settings from environment variables and the .env file.
-    It validates all required values and raises an error if any are missing or invalid.
-
-    Params:
-        None
-
-    Returns:
-        Settings: A validated Settings instance with all configuration values.
-
-    Raises:
-        ValidationError: If any required environment variable is missing or invalid.
-    """
     return Settings()
-
-
-# Singleton instance for easy access throughout the application
-settings: Settings = get_settings()
