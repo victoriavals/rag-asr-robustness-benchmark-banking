@@ -1,740 +1,296 @@
-"""
-Research Lab Tab for the Dual-Mode RAG Application.
-
-This module provides a benchmarking interface for comparing
-Text (Ground Truth) vs Voice (ASR/Whisper) pipelines using the
-MINDS-14 dataset, calculating WER and embedding similarity metrics.
-"""
-
-from io import BytesIO
-from typing import TypedDict
-
-import numpy as np
+"""Explicit research journeys with reproducible runs and persistent, inspectable results."""
+import json
+import hashlib
+import logging
+from datetime import datetime, timezone
+from typing import Any
+from uuid import uuid4
+import pandas as pd
 import streamlit as st
-from jiwer import wer
-from sklearn.metrics.pairwise import cosine_similarity
+from src.config import get_settings
+from src.metrics import calculate_wer, calculate_raw_wer, calculate_cer, cosine_similarity_score
+from src.minds14_loader import MINDS14Loader, get_available_languages
+from src.sumopod_services import get_embedding, generate_grounded_response, transcribe_audio, require_asr_model
+from src.vector_db import search_documents
+from src.tabs.batch_evaluation import render_batch_evaluation_tab
+from src.tabs.live_demo import NO_CONTEXT, UserMessageError, _show_sources, _refresh_health, _health_is_ready, _render_health, _asr_configuration_notice
+from src.tabs.ui_state import _spreadsheet_safe_csv, model_configuration, navigation_choice, remember_widget, saved_widget_value
 
-from src.minds14_loader import MINDS14Loader, MINDS14Sample, get_available_languages
-from src.openai_services import get_embedding, get_llm_response, transcribe_audio
-from src.vector_db import search_similar_docs
+logger = logging.getLogger(__name__)
 
 
-class ExperimentResult(TypedDict):
-    """
-    Represents results from a pipeline experiment.
+def _model_configuration() -> dict[str, Any]:
+    return model_configuration(get_settings(), st.session_state.get("database_health", {}))
 
-    Attributes:
-        transcript (str): The input transcript text.
-        embedding (list[float]): The generated embedding vector.
-        retrieved_docs (list[str]): Documents retrieved from vector DB.
-        llm_response (str): The LLM-generated response.
-    """
 
-    transcript: str
-    embedding: list[float]
-    retrieved_docs: list[str]
-    llm_response: str
+def _safe_error(message: str, exc: Exception) -> None:
+    logger.warning("Research action failed (%s)", type(exc).__name__)
+    st.error(message)
 
 
 def _get_dataset_loader(language: str) -> MINDS14Loader:
-    """
-    Get or create a cached MINDS-14 dataset loader.
-
-    Params:
-        language (str): Language code (e.g., 'en-US').
-
-    Returns:
-        MINDS14Loader: The dataset loader instance.
-    """
-    cache_key: str = f"minds14_loader_{language}"
-
-    if cache_key not in st.session_state:
-        loader: MINDS14Loader = MINDS14Loader(language=language)
-        st.session_state[cache_key] = loader
-
-    return st.session_state[cache_key]
+    key = f"minds14_loader_{language}"
+    if key not in st.session_state:
+        st.session_state[key] = MINDS14Loader(language=language)
+    return st.session_state[key]
 
 
-def _run_text_pipeline(text: str) -> ExperimentResult:
-    """
-    Run the text-based RAG pipeline (Pipeline A).
+def _run_text_pipeline(text: str, collection_name: str | None = None) -> dict[str, Any]:
+    embedding = get_embedding(text)
+    settings = get_settings()
+    docs = search_documents(query_vector=embedding, top_k=settings.retrieval_top_k,
+                            score_threshold=settings.retrieval_score_threshold, collection_name=collection_name)
+    docs = [doc for doc in docs if str(doc.get("text", "")).strip()]
+    response = generate_grounded_response(prompt=text, documents=docs, history=[]) if docs else NO_CONTEXT
+    return {"transcript": text, "embedding": embedding, "retrieved_docs": docs, "llm_response": response}
 
-    Params:
-        text (str): The input text query.
 
-    Returns:
-        ExperimentResult: The pipeline results including embedding,
-            retrieved docs, and LLM response.
-    """
-    # Generate embedding
-    embedding: list[float] = get_embedding(text)
+def _run_voice_pipeline(audio_buffer, collection_name: str | None = None) -> dict[str, Any]:
+    require_asr_model()
+    transcript = transcribe_audio(audio_buffer).strip()
+    if not transcript:
+        raise UserMessageError("No speech was recognized. Choose another sample or retry the experiment.")
+    return _run_text_pipeline(transcript, collection_name)
 
-    # Search for similar documents
-    retrieved_docs: list[str] = search_similar_docs(
-        query_vector=embedding,
-        top_k=3,
+
+def _sample_controls():
+    languages = get_available_languages()
+    language_key = "research_language_select"
+    saved_locale = saved_widget_value(language_key, "en-US", allowed=languages)
+    language = st.selectbox(
+        "Dataset locale", languages, index=languages.index(saved_locale), key=language_key,
+        on_change=remember_widget, args=(language_key,),
     )
-
-    # Generate LLM response
-    context: str = "\n\n---\n\n".join(retrieved_docs) if retrieved_docs else ""
-    llm_response: str = get_llm_response(prompt=text, context=context)
-
-    result: ExperimentResult = {
-        "transcript": text,
-        "embedding": embedding,
-        "retrieved_docs": retrieved_docs,
-        "llm_response": llm_response,
-    }
-
-    return result
-
-
-def _run_voice_pipeline(audio_buffer: BytesIO) -> ExperimentResult:
-    """
-    Run the voice-based RAG pipeline (Pipeline B).
-
-    Params:
-        audio_buffer (BytesIO): Audio data as BytesIO buffer.
-
-    Returns:
-        ExperimentResult: The pipeline results including transcription,
-            embedding, retrieved docs, and LLM response.
-    """
-    # Transcribe audio using Whisper
-    transcript: str = transcribe_audio(audio_buffer)
-
-    # Generate embedding
-    embedding: list[float] = get_embedding(transcript)
-
-    # Search for similar documents
-    retrieved_docs: list[str] = search_similar_docs(
-        query_vector=embedding,
-        top_k=3,
-    )
-
-    # Generate LLM response
-    context: str = "\n\n---\n\n".join(retrieved_docs) if retrieved_docs else ""
-    llm_response: str = get_llm_response(prompt=transcript, context=context)
-
-    result: ExperimentResult = {
-        "transcript": transcript,
-        "embedding": embedding,
-        "retrieved_docs": retrieved_docs,
-        "llm_response": llm_response,
-    }
-
-    return result
-
-
-def _calculate_wer(reference: str, hypothesis: str) -> float:
-    """
-    Calculate Word Error Rate between reference and hypothesis text.
-
-    Params:
-        reference (str): The ground truth reference text.
-        hypothesis (str): The ASR-generated hypothesis text.
-
-    Returns:
-        float: The Word Error Rate (0.0 = perfect, 1.0 = completely wrong).
-    """
-    if not reference.strip() or not hypothesis.strip():
-        return 1.0
-
-    error_rate: float = wer(reference.lower(), hypothesis.lower())
-    return error_rate
-
-
-def _calculate_cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
-    """
-    Calculate cosine similarity between two embedding vectors.
-
-    Params:
-        vec_a (list[float]): First embedding vector.
-        vec_b (list[float]): Second embedding vector.
-
-    Returns:
-        float: Cosine similarity score (0.0 to 1.0).
-    """
-    arr_a: np.ndarray = np.array(vec_a).reshape(1, -1)
-    arr_b: np.ndarray = np.array(vec_b).reshape(1, -1)
-
-    similarity: float = float(cosine_similarity(arr_a, arr_b)[0][0])
-    return similarity
-
-
-def _display_pipeline_results(result: ExperimentResult, title: str) -> None:
-    """
-    Display results from a pipeline experiment.
-
-    Params:
-        result (ExperimentResult): The experiment results to display.
-        title (str): The title for this results section.
-
-    Returns:
-        None
-    """
-    st.subheader(title)
-
-    st.markdown("**Input Transcript:**")
-    st.info(result["transcript"])
-
-    st.markdown("**Retrieved Documents:**")
-    for i, doc in enumerate(result["retrieved_docs"], 1):
-        with st.expander(f"Document {i}"):
-            st.write(doc)
-
-    st.markdown("**LLM Response:**")
-    st.success(result["llm_response"])
-
-
-
-
-def render_batch_evaluation_tab() -> None:
-    """
-    Render the batch evaluation section for multi-accent analysis.
-
-    Allows running batch evaluations across en-US, en-GB, en-AU locales
-    and displays aggregated metrics with Plotly visualizations.
-
-    Params:
-        None
-
-    Returns:
-        None
-    """
-    import plotly.express as px
-    import plotly.graph_objects as go
-    import pandas as pd
-
-    from src.evaluation_engine import (
-        run_batch_evaluation,
-        summarize_results,
-        summarize_by_intent,
-        INTENT_KEYWORDS,
-    )
-
-    st.header("📊 Batch Evaluation - Multi-Accent Analysis")
-    st.markdown(
-        "Run batch evaluations across **en-US**, **en-GB**, and **en-AU** locales "
-        "to compare ASR performance and retrieval accuracy across English accents."
-    )
-
-    st.markdown("---")
-
-    # Dataset size info
-    LOCALE_DATASET_SIZES: dict[str, int] = {
-        "en-US": 563,
-        "en-GB": 592,
-        "en-AU": 654,
-    }
-
-    # Configuration
-    col_config1, col_config2 = st.columns(2)
-
-    with col_config1:
-        # Locale selection
-        available_locales: list[str] = ["en-US", "en-GB", "en-AU"]
-        selected_locales: list[str] = st.multiselect(
-            "🌍 Select Locales",
-            options=available_locales,
-            default=available_locales,
-            key="batch_locales",
-        )
-
-        # Show dataset sizes
-        if selected_locales:
-            st.caption("📊 Dataset sizes:")
-            for loc in selected_locales:
-                st.caption(f"  • {loc}: {LOCALE_DATASET_SIZES[loc]} samples")
-
-    with col_config2:
-        # Option to use full dataset
-        use_full_dataset: bool = st.checkbox(
-            "📦 Use Full Dataset (All Samples)",
-            value=False,
-            key="use_full_dataset",
-            help="Use all available samples for each locale (en-AU: 654, en-GB: 592, en-US: 563)",
-        )
-
-        if use_full_dataset:
-            samples_per_locale: int = -1  # Flag for full dataset
-            total_samples_info: int = sum(LOCALE_DATASET_SIZES[loc] for loc in selected_locales)
-            st.info(f"📊 Will evaluate **{total_samples_info}** total samples")
-        else:
-            # Samples per locale slider
-            samples_per_locale = st.slider(
-                "📁 Samples per Locale",
-                min_value=5,
-                max_value=100,
-                value=10,
-                step=5,
-                key="batch_samples",
-            )
-
-    # Show intent keywords info
-    with st.expander("📋 Intent Keywords Mapping"):
-        st.markdown("Keywords used to check retrieval relevance:")
-        for intent, keywords in INTENT_KEYWORDS.items():
-            st.markdown(f"**{intent}**: {', '.join(keywords[:5])}...")
-
-    st.markdown("---")
-
-    # Run batch evaluation button
-    if st.button(
-        "🚀 Start Multi-Region Analysis",
-        type="primary",
-        use_container_width=True,
-        disabled=len(selected_locales) == 0,
-    ):
-        if not selected_locales:
-            st.error("Please select at least one locale.")
-            return
-
-        # Calculate total samples
-        if use_full_dataset:
-            total_samples: int = sum(LOCALE_DATASET_SIZES[loc] for loc in selected_locales)
-        else:
-            total_samples = len(selected_locales) * samples_per_locale
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-
-        def update_progress(current: int, total: int, locale: str, sample_id: str) -> None:
-            """Update progress bar and status text."""
-            progress: float = current / total
-            progress_bar.progress(progress)
-            status_text.text(f"Processing {locale} - {sample_id} ({current}/{total})")
-
-        with st.spinner(f"Running batch evaluation on {total_samples} samples..."):
-            try:
-                # Run batch evaluation
-                df = run_batch_evaluation(
-                    locales=selected_locales,
-                    samples_per_locale=samples_per_locale,
-                    progress_callback=update_progress,
-                )
-
-                progress_bar.progress(1.0)
-                status_text.text("✅ Evaluation complete!")
-
-                # Store results
-                st.session_state.batch_results = df
-                st.session_state.batch_locales_used = selected_locales
-
-            except Exception as e:
-                st.error(f"Evaluation failed: {e}")
-                return
-
-        st.success(f"✅ Evaluated {len(df)} samples across {len(selected_locales)} locales!")
-        _display_batch_results(df, selected_locales)
-
-    # Show previous results if available
-    elif "batch_results" in st.session_state:
-        df = st.session_state.batch_results
-        locales_used = st.session_state.get("batch_locales_used", ["en-US", "en-GB", "en-AU"])
-        st.info(f"📊 Showing previous batch results ({len(df)} samples)")
-        _display_batch_results(df, locales_used)
-
-
-def _display_batch_results(df, locales: list[str]) -> None:
-    """
-    Display batch evaluation results with Plotly visualizations.
-
-    Params:
-        df: DataFrame with evaluation results.
-        locales (list[str]): List of locales evaluated.
-
-    Returns:
-        None
-    """
-    import plotly.express as px
-    import plotly.graph_objects as go
-    import pandas as pd
-
-    from src.evaluation_engine import summarize_results, summarize_by_intent
-
-    # Get summary data
-    summary_locale = summarize_results(df)
-
-    st.markdown("---")
-    st.subheader("📈 Comparative Analysis Results")
-
-    # ===== SECTION 1: Metrics Cards =====
-    st.markdown("### 📊 Key Metrics by Locale")
-    metric_cols = st.columns(len(locales))
-    for i, (_, row) in enumerate(summary_locale.iterrows()):
-        with metric_cols[i]:
-            st.markdown(f"#### 🌍 {row['locale']}")
-            st.metric("Avg WER", f"{row['avg_wer_%']:.1f}%", 
-                     help="Word Error Rate - Lower is better")
-            st.metric("Text Hit Rate", f"{row['text_hit_rate_%']:.1f}%",
-                     help="Retrieval accuracy with ground truth text")
-            st.metric("Voice Hit Rate", f"{row['voice_hit_rate_%']:.1f}%",
-                     help="Retrieval accuracy with ASR transcription")
-
-    st.markdown("---")
-
-    # ===== SECTION 2: WER Comparison Bar Chart =====
-    st.markdown("### 📉 Average Word Error Rate (WER) by Locale")
-    st.markdown("*Lower WER indicates better ASR accuracy for that accent.*")
-
-    fig_wer = px.bar(
-        summary_locale,
-        x="locale",
-        y="avg_wer_%",
-        color="locale",
-        color_discrete_sequence=px.colors.qualitative.Set2,
-        labels={"locale": "Locale", "avg_wer_%": "Average WER (%)"},
-        title="Word Error Rate Comparison Across English Accents",
-    )
-    fig_wer.update_layout(
-        xaxis_title="Locale",
-        yaxis_title="Average WER (%)",
-        showlegend=False,
-        height=400,
-    )
-    fig_wer.update_traces(
-        texttemplate='%{y:.1f}%',
-        textposition='outside',
-    )
-    st.plotly_chart(fig_wer, use_container_width=True)
-
-    st.markdown("---")
-
-    # ===== SECTION 3: Grouped Bar Chart - Text vs Voice Hit Rate =====
-    st.markdown("### 🎯 Retrieval Hit Rate: Text Baseline vs Voice Experiment")
-    st.markdown(
-        "*This shows how ASR errors impact document retrieval accuracy. "
-        "A large gap indicates ASR errors significantly degrade retrieval.*"
-    )
-
-    # Prepare data for grouped bar chart
-    hit_rate_data = []
-    for _, row in summary_locale.iterrows():
-        hit_rate_data.append({
-            "Locale": row["locale"],
-            "Pipeline": "Text Baseline",
-            "Hit Rate (%)": row["text_hit_rate_%"],
-        })
-        hit_rate_data.append({
-            "Locale": row["locale"],
-            "Pipeline": "Voice (ASR)",
-            "Hit Rate (%)": row["voice_hit_rate_%"],
-        })
-
-    hit_rate_df = pd.DataFrame(hit_rate_data)
-
-    fig_hit = px.bar(
-        hit_rate_df,
-        x="Locale",
-        y="Hit Rate (%)",
-        color="Pipeline",
-        barmode="group",
-        color_discrete_map={
-            "Text Baseline": "#2ecc71",  # Green
-            "Voice (ASR)": "#e74c3c",    # Red
-        },
-        title="Text vs Voice Retrieval Hit Rate by Locale",
-    )
-    fig_hit.update_layout(
-        xaxis_title="Locale",
-        yaxis_title="Hit Rate (%)",
-        legend_title="Pipeline",
-        height=450,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
-        )
-    )
-    fig_hit.update_traces(
-        texttemplate='%{y:.1f}%',
-        textposition='outside',
-    )
-    st.plotly_chart(fig_hit, use_container_width=True)
-
-    # Calculate and display degradation
-    st.markdown("#### 📉 ASR Impact on Retrieval (Degradation)")
-    deg_cols = st.columns(len(locales))
-    for i, (_, row) in enumerate(summary_locale.iterrows()):
-        degradation = row["text_hit_rate_%"] - row["voice_hit_rate_%"]
-        with deg_cols[i]:
-            delta_color = "inverse" if degradation > 0 else "normal"
-            st.metric(
-                label=row["locale"],
-                value=f"{row['voice_hit_rate_%']:.1f}%",
-                delta=f"-{degradation:.1f}% from text",
-                delta_color=delta_color,
-            )
-
-    st.markdown("---")
-
-    # ===== SECTION 4: Summary by Intent =====
-    st.markdown("### 📋 Results by Intent Class")
-    summary_intent = summarize_by_intent(df)
-
-    # Intent bar chart
-    fig_intent = px.bar(
-        summary_intent,
-        x="intent_name",
-        y=["text_hit_rate_%", "voice_hit_rate_%"],
-        barmode="group",
-        labels={
-            "intent_name": "Intent",
-            "value": "Hit Rate (%)",
-            "variable": "Pipeline"
-        },
-        title="Hit Rate by Intent Class",
-        color_discrete_map={
-            "text_hit_rate_%": "#2ecc71",
-            "voice_hit_rate_%": "#e74c3c",
-        },
-    )
-    fig_intent.update_layout(
-        xaxis_title="Intent",
-        yaxis_title="Hit Rate (%)",
-        height=500,
-        xaxis_tickangle=-45,
-        legend_title="Pipeline",
-    )
-    # Rename legend labels
-    fig_intent.for_each_trace(lambda t: t.update(
-        name=t.name.replace("text_hit_rate_%", "Text Baseline").replace("voice_hit_rate_%", "Voice (ASR)")
-    ))
-    st.plotly_chart(fig_intent, use_container_width=True)
-
-    # Summary tables
-    with st.expander("📊 Summary Tables"):
-        st.markdown("**By Locale:**")
-        st.dataframe(summary_locale, use_container_width=True)
-        
-        st.markdown("**By Intent:**")
-        st.dataframe(summary_intent, use_container_width=True)
-
-    st.markdown("---")
-
-    # ===== SECTION 5: Raw Data & Export =====
-    with st.expander("📋 Raw Evaluation Data"):
-        st.dataframe(df, use_container_width=True)
-
-    # Download button
-    csv_data: str = df.to_csv(index=False)
-    st.download_button(
-        label="📥 Download Results (CSV)",
-        data=csv_data,
-        file_name="batch_evaluation_results.csv",
-        mime="text/csv",
-    )
-
-
-def render_research_tab() -> None:
-    """
-    Render the Research Lab tab with sub-tabs for different analyses.
-
-    Provides:
-    - Single Sample Analysis: Compare text vs voice for one sample
-    - Batch Evaluation: Multi-accent analysis across locales
-
-    Params:
-        None
-
-    Returns:
-        None
-    """
-    st.header("🔬 Research Lab")
-
-    # Create sub-tabs
-    tab_single, tab_batch = st.tabs([
-        "🔍 Single Sample Analysis",
-        "📊 Batch Evaluation",
-    ])
-
-    with tab_single:
-        _render_single_sample_analysis()
-
-    with tab_batch:
-        render_batch_evaluation_tab()
+    loader = st.session_state.get(f"minds14_loader_{language}")
+    if loader is None and st.button("Load dataset", key="load_single_dataset", type="primary"):
+        try:
+            with st.spinner("Loading dataset…"):
+                loader = _get_dataset_loader(language)
+        except Exception as exc:
+            _safe_error("The dataset could not be loaded. Check dataset availability and the configured revision, then retry.", exc)
+    if loader is None:
+        st.write("Load the dataset to preview an audio sample. An uncached dataset may need to download first.")
+        return None, None, None, language
+    try:
+        size = len(loader)
+        if size == 0:
+            st.warning("This dataset contains no samples.")
+            return None, None, None, language
+        sample_key = f"research_sample_index_{language}"
+        saved_index = saved_widget_value(sample_key, 0, allowed=range(size))
+        index = st.slider(
+            "Sample index", 0, size - 1, saved_index, key=sample_key,
+            on_change=remember_widget, args=(sample_key,),
+        ) if size > 1 else 0
+        sample = loader.get_sample(index)
+        st.write(f"Sample `{sample['id']}` · Intent: {sample['intent_name']}")
+        st.write(sample["transcription"])
+        if sample.get("english_transcription") and sample["english_transcription"] != sample["transcription"]:
+            st.caption(f"English translation (display only): {sample['english_transcription']}")
+        st.audio(sample["audio_path"], format="audio/wav")
+        return loader, sample, index, language
+    except Exception as exc:
+        _safe_error("This sample could not be decoded. Choose another sample or dataset locale.", exc)
+        return None, None, None, language
+
+
+def _render_last_experiment(marker: dict[str, Any] | None) -> None:
+    attempt = st.session_state.get("last_single_attempt", {})
+    result = st.session_state.get("last_experiment")
+    if result is None:
+        if attempt.get("error"):
+            st.error(attempt["error"])
+        return
+    st.subheader("Experiment results")
+    if attempt.get("error"):
+        st.warning(f"Latest attempt failed for {attempt['locale']} · `{attempt['sample_id']}`. {attempt['error']} Showing the last successful result below.")
+    if marker != result["marker"]:
+        st.info("Showing a previous experiment. Its sample, language or model configuration differs from the current selection.")
+    finished = datetime.fromisoformat(result["created_utc"]).astimezone(timezone.utc)
+    st.write(f"{result['marker']['locale']} · Sample `{result['marker']['sample_id']}` · {finished:%d %b %Y, %H:%M UTC}")
+    cer = "Not measured" if result.get("cer") is None else f"{result['cer']:.2%}"
+    st.write(f"**Word error rate (WER)** {result['wer']:.2%} · **Character error rate (CER)** {cer}")
+    st.markdown("#### Transcripts")
+    labels = ("Reference transcript", "ASR transcript")
+    branches = (result["text_result"], result["voice_result"])
+    for column, label, branch in zip(st.columns(2), labels, branches):
+        with column:
+            st.markdown(f"**{label}**")
+            st.write(branch["transcript"])
+    st.markdown("#### Answers")
+    for column, label, branch in zip(st.columns(2), ("Text answer", "Voice answer"), branches):
+        with column:
+            st.markdown(f"**{label}**")
+            st.write(branch["llm_response"])
+            _show_sources(branch["retrieved_docs"])
+    with st.expander("Metrics and experiment configuration"):
+        st.write(f"Raw WER: {result['wer_raw']:.2%} · Embedding similarity: {result['similarity']:.4f}")
+        st.write("WER and CER measure transcription errors and can exceed 100%. Normalized CER omits whitespace. Answer correctness requires separate review.")
+        st.json(result["marker"])
 
 
 def _render_single_sample_analysis() -> None:
-    """
-    Render the single sample analysis section.
+    st.subheader("Single sample analysis")
+    st.write("Compare the reference transcript with speech recognition on the same sample. Both use the original language.")
+    asr_notice = _asr_configuration_notice()
+    if asr_notice:
+        st.info("Speech recognition is unavailable. You can still preview a sample. See Setup in the sidebar.")
+    loader, sample, index, language = _sample_controls()
+    marker = {"sample_id": sample["id"], "locale": language, **_model_configuration()} if sample else None
+    if sample is not None and st.button("Run experiment", key="run_single_experiment", type="primary", disabled=asr_notice is not None):
+        attempt = {"sample_id": sample["id"], "locale": language}
+        with st.status("Checking the knowledge base…", expanded=False) as progress:
+            try:
+                require_asr_model()
+                health = _refresh_health()
+                if not _health_is_ready(health):
+                    raise UserMessageError("The knowledge base is unavailable. Check Setup in the sidebar and try again.")
+                physical = health.get('physical_collection', get_settings().qdrant_collection)
+                progress.update(label="Running the reference transcript…")
+                text_result = _run_text_pipeline(sample["transcription"], physical)
+                progress.update(label="Transcribing and running the voice comparison…")
+                voice_result = _run_voice_pipeline(loader.get_audio_bytes(index, sample=sample), physical)
+                marker = {**attempt, **_model_configuration()}
+                st.session_state.last_experiment = {
+                    "id": uuid4().hex, "marker": marker, "sample": sample,
+                    "ground_truth": sample["transcription"], "text_result": text_result,
+                    "voice_result": voice_result,
+                    "wer": calculate_wer(sample["transcription"], voice_result["transcript"]),
+                    "wer_raw": calculate_raw_wer(sample["transcription"], voice_result["transcript"]),
+                    "cer": calculate_cer(sample["transcription"], voice_result["transcript"]),
+                    "similarity": cosine_similarity_score(text_result["embedding"], voice_result["embedding"]),
+                    "created_utc": datetime.now(timezone.utc).isoformat(),
+                }
+                progress.update(label="Experiment complete", state="complete")
+            except UserMessageError as exc:
+                attempt["error"] = str(exc)
+            except Exception as exc:
+                logger.warning("Single sample experiment failed (%s)", type(exc).__name__)
+                attempt["error"] = "Check the model and database settings, then retry."
+            if attempt.get("error"):
+                progress.update(label="Experiment failed", state="error")
+        st.session_state.last_single_attempt = attempt
+    _render_last_experiment(marker)
 
-    Provides a side-by-side comparison of Text vs Voice pipelines
-    using the MINDS-14 dataset with WER and embedding similarity metrics.
 
-    Params:
-        None
+def _review_candidates() -> dict[str, dict[str, Any]]:
+    candidates = {}
+    experiment = st.session_state.get("last_experiment")
+    if experiment:
+        experiment_id = experiment.get("id", experiment["created_utc"])
+        marker = experiment["marker"]
+        for branch in ("text", "voice"):
+            result = experiment[f"{branch}_result"]
+            candidates[f"Last experiment · {branch}"] = {
+                "experiment_id": experiment_id, "locale": marker["locale"],
+                "sample_id": marker["sample_id"], "branch": branch,
+                "query": result["transcript"], "answer": result["llm_response"],
+                "sources": result["retrieved_docs"],
+            }
+    history = st.session_state.get("chat_history", [])
+    for index in range(len(history) - 1, 0, -1):
+        question, answer = history[index - 1:index + 1]
+        if (question.get("role") == "user" and answer.get("role") == "assistant"
+                and answer.get("status", "success") == "success" and answer.get("content")):
+            candidates["Latest chat answer"] = {
+                "experiment_id": answer.get("turn_id", f"chat:{index}"),
+                "locale": "", "sample_id": "", "branch": question.get("origin", "chat"),
+                "query": question["content"], "answer": answer["content"],
+                "sources": answer.get("sources", []),
+            }
+            break
+    return candidates
 
-    Returns:
-        None
-    """
-    st.subheader("🔍 Single Sample Analysis")
-    st.markdown(
-        "Compare **Text Baseline** (Ground Truth) vs **Voice Experiment** (ASR/Whisper) "
-        "pipelines using the **MINDS-14** dataset."
-    )
 
-    st.markdown("---")
+def _review_score(label: str, key: str) -> str:
+    choices = ("Not reviewed", "0", "1", "2")
+    saved = saved_widget_value(key, choices[0], allowed=choices)
+    return st.selectbox(label, choices, index=choices.index(saved), key=key,
+                        on_change=remember_widget, args=(key,))
 
-    # Language selection
-    col_lang, col_info = st.columns([1, 2])
 
-    with col_lang:
-        available_languages: list[str] = get_available_languages()
-        selected_language: str = st.selectbox(
-            "🌍 Select Language",
-            options=available_languages,
-            index=available_languages.index("en-US"),
-            key="research_language_select",
-        )
+def _render_answer_quality_review() -> None:
+    st.subheader("Manual answer review")
+    candidates = _review_candidates()
+    if not candidates:
+        st.info("Run a single sample experiment or ask the assistant a question to get an answer to review.")
+    else:
+        _render_review_draft(candidates)
+    records = st.session_state.get("answer_quality_reviews", [])
+    if records:
+        frame = pd.DataFrame(records)
+        st.subheader(f"Saved reviews ({len(records)})")
+        columns = ["candidate_source", "support", "correctness", "relevance", "reviewer"]
+        st.dataframe(frame[columns], width="stretch", hide_index=True, column_config={
+            "candidate_source": "Answer", "support": "Source support", "correctness": "Correctness",
+            "relevance": "Relevance", "reviewer": "Reviewer",
+        })
+        st.download_button("Download reviews CSV", _spreadsheet_safe_csv(frame), file_name="manual_answer_reviews.csv",
+                           mime="text/csv", key="manual_reviews_csv", on_click="ignore")
 
-    with col_info:
-        st.info(
-            f"**Dataset:** [PolyAI/minds14](https://huggingface.co/datasets/PolyAI/minds14) | "
-            f"**Language:** {selected_language}"
-        )
 
-    # Load dataset
-    try:
-        with st.spinner(f"Loading MINDS-14 dataset ({selected_language})..."):
-            loader: MINDS14Loader = _get_dataset_loader(selected_language)
-            dataset_size: int = len(loader)
-
-        st.success(f"✅ Loaded {dataset_size} samples from MINDS-14 ({selected_language})")
-
-    except Exception as e:
-        st.error(f"Failed to load dataset: {e}")
-        st.info("Please ensure you have installed the `datasets` library: `pip install datasets`")
-        return
-
-    # Sample selection
-    sample_index: int = st.slider(
-        "📁 Select Sample Index",
-        min_value=0,
-        max_value=dataset_size - 1,
-        value=0,
-        key="research_sample_index",
-    )
-
-    # Get sample
-    sample: MINDS14Sample = loader.get_sample(sample_index)
-
-    # Display sample info
-    st.markdown("### 📋 Sample Information")
-    col_trans, col_meta = st.columns([2, 1])
-
-    with col_trans:
-        st.markdown("**Ground Truth Transcript:**")
-        st.info(sample["transcription"])
-
-        if sample["english_transcription"]:
-            st.markdown("**English Translation:**")
-            st.caption(sample["english_transcription"])
-
-    with col_meta:
-        st.metric("Intent", sample["intent_name"].upper())
-        st.metric("Sample ID", sample["id"])
-        st.metric("Sampling Rate", f"{sample['sampling_rate']} Hz")
-
-    # Audio player
-    st.audio(sample["audio_path"], format="audio/wav")
-
-    st.markdown("---")
-
-    # Run experiment button
-    run_experiment: bool = st.button(
-        "🚀 Run Experiment",
-        type="primary",
-        use_container_width=True,
-        key="run_single_experiment",
-    )
-
-    if run_experiment:
-        ground_truth: str = sample["transcription"]
-
-        # Use English transcription if available and language is not English
-        if sample["english_transcription"] and not selected_language.startswith("en"):
-            ground_truth_for_rag: str = sample["english_transcription"]
-            st.info("Using English translation for RAG (better retrieval from English knowledge base)")
-        else:
-            ground_truth_for_rag = ground_truth
-
-        with st.spinner("Running experiments..."):
-            # Run Text Pipeline (Pipeline A)
-            st.toast("Running Text Pipeline (Ground Truth)...")
-            text_result: ExperimentResult = _run_text_pipeline(ground_truth_for_rag)
-
-            # Run Voice Pipeline (Pipeline B)
-            st.toast("Running Voice Pipeline (Whisper)...")
-            audio_buffer: BytesIO = loader.get_audio_bytes(sample_index)
-            voice_result: ExperimentResult = _run_voice_pipeline(audio_buffer)
-
-        # Calculate metrics
-        wer_score: float = _calculate_wer(
-            reference=ground_truth,
-            hypothesis=voice_result["transcript"],
-        )
-        similarity_score: float = _calculate_cosine_similarity(
-            vec_a=text_result["embedding"],
-            vec_b=voice_result["embedding"],
-        )
-
-        st.markdown("---")
-
-        # Display metrics prominently
-        st.subheader("📊 Experiment Metrics")
-        metric_col1, metric_col2, metric_col3 = st.columns(3)
-
-        with metric_col1:
-            st.metric(
-                label="Word Error Rate (WER)",
-                value=f"{wer_score:.2%}",
-                help="Lower is better. 0% = perfect transcription.",
-            )
-
-        with metric_col2:
-            st.metric(
-                label="Embedding Similarity",
-                value=f"{similarity_score:.4f}",
-                help="Higher is better. 1.0 = identical embeddings.",
-            )
-
-        with metric_col3:
-            # Calculate accuracy as inverse of WER
-            accuracy: float = max(0.0, 1.0 - wer_score)
-            st.metric(
-                label="Transcription Accuracy",
-                value=f"{accuracy:.2%}",
-                help="Higher is better. 100% = perfect transcription.",
-            )
-
-        st.markdown("---")
-
-        # Side-by-side comparison
-        col_text, col_voice = st.columns(2)
-
-        with col_text:
-            _display_pipeline_results(
-                result=text_result,
-                title="📝 Pipeline A: Text Baseline",
-            )
-
-        with col_voice:
-            _display_pipeline_results(
-                result=voice_result,
-                title="🎤 Pipeline B: Voice Experiment",
-            )
-
-        # Store results in session state for further analysis
-        st.session_state.last_experiment = {
-            "sample": sample,
-            "language": selected_language,
-            "ground_truth": ground_truth,
-            "text_result": text_result,
-            "voice_result": voice_result,
-            "wer": wer_score,
-            "similarity": similarity_score,
+def _render_review_draft(candidates: dict[str, dict[str, Any]]) -> None:
+    key = "quality_candidate"
+    choices = list(candidates)
+    saved = saved_widget_value(key, choices[0], allowed=choices)
+    selected = st.selectbox("Answer to review", choices, index=choices.index(saved), key=key,
+                            on_change=remember_widget, args=(key,))
+    candidate = candidates[selected]
+    candidate_id = hashlib.sha256(json.dumps(candidate, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+    if candidate["sample_id"]:
+        st.write(f"{candidate['locale']} · Sample `{candidate['sample_id']}` · Experiment `{candidate['experiment_id']}`")
+    st.markdown("**Question**")
+    st.write(candidate["query"])
+    st.markdown("**Answer**")
+    st.write(candidate["answer"])
+    _show_sources(candidate["sources"])
+    st.markdown("#### Review rubric")
+    st.write("Score each item from 0 (unsupported, incorrect, or off topic) to 2 (fully supported, correct, or relevant). Use 1 for partial credit.")
+    st.write("Reviews are saved for this session. Download the CSV to keep a copy.")
+    reviewer_key = "quality_reviewer"
+    reviewer = st.text_input("Reviewer", value=saved_widget_value(reviewer_key, ""), max_chars=80, key=reviewer_key,
+                             on_change=remember_widget, args=(reviewer_key,))
+    draft = f"review_{candidate_id}"
+    scores = {
+        "support": _review_score("Support from displayed sources", f"{draft}_support"),
+        "correctness": _review_score("Factual correctness", f"{draft}_correctness"),
+        "relevance": _review_score("Relevance to the question", f"{draft}_relevance"),
+    }
+    notes_key = f"{draft}_notes"
+    notes = st.text_area("Evidence and notes", value=saved_widget_value(notes_key, ""), max_chars=4000, key=notes_key,
+                         on_change=remember_widget, args=(notes_key,))
+    if st.button("Save review", key="save_quality_review", type="primary"):
+        if "Not reviewed" in scores.values():
+            st.error("Select all three rubric scores before saving the review.")
+            return
+        sources = candidate["sources"]
+        record = {
+            "candidate_id": candidate_id, "candidate_source": selected,
+            "query": candidate["query"], "answer": candidate["answer"],
+            "source_ids": json.dumps([doc.get("id") for doc in sources]),
+            "observed_sources": json.dumps(sources, ensure_ascii=False, sort_keys=True, default=str),
+            **{name: int(score) for name, score in scores.items()},
+            "reviewer": reviewer, "notes": notes, "reviewed_utc": datetime.now(timezone.utc).isoformat(),
+            **{name: candidate[name] for name in ("experiment_id", "locale", "sample_id", "branch")},
         }
+        st.session_state.answer_quality_reviews = [*st.session_state.get("answer_quality_reviews", []), record]
+        st.success("Review saved in this session.")
+
+
+def render_research_tab() -> None:
+    st.header("Research Lab")
+    with st.sidebar:
+        health_panel = st.container()
+    # Only the chosen journey executes: opening Batch never loads a single-sample dataset.
+    mode = navigation_choice("Research workflow", ("Single Sample", "Batch", "Review"), "research_mode")
+    try:
+        if mode == "Single Sample":
+            _render_single_sample_analysis()
+        elif mode == "Batch":
+            render_batch_evaluation_tab()
+        else:
+            _render_answer_quality_review()
+    except Exception as exc:
+        _safe_error("This view could not be displayed. Check the configuration or choose another analysis. Saved results remain in this session.", exc)
+    with health_panel:
+        _render_health()
