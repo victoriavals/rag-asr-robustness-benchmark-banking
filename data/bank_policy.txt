@@ -1,0 +1,67 @@
+=== KEBIJAKAN DAN PANDUAN LAYANAN NEO BANK ===
+
+[KATEGORI: SALDO & TRANSAKSI]
+1. Cek Saldo
+Nasabah dapat mengecek saldo melalui tiga cara:
+- Aplikasi Mobile: Buka aplikasi Neo Bank, saldo akan muncul di halaman utama (Dashboard).
+- SMS Banking: Ketik SALDO<spasi>PIN kirim ke 3300.
+- ATM: Masukkan kartu, pilih menu "Informasi Rekening" > "Informasi Saldo".
+
+2. Mutasi Rekening (Latest Transactions)
+Untuk melihat riwayat transaksi terakhir:
+- Di Aplikasi: Pilih menu "Riwayat" di bagian bawah layar. Anda bisa memfilter transaksi hingga 90 hari terakhir.
+- E-Statement: Laporan bulanan akan dikirim ke email terdaftar setiap tanggal 5.
+
+[KATEGORI: PEMBAYARAN & TRANSFER]
+3. Pembayaran Tagihan (Pay Bill)
+Langkah membayar tagihan (Listrik, Air, Internet):
+- Buka menu "Pembayaran" di aplikasi.
+- Pilih jenis tagihan (misal: PLN/PDAM).
+- Masukkan Nomor Pelanggan.
+- Konfirmasi jumlah dan masukkan PIN transaksi.
+- Bukti bayar akan tersimpan otomatis di inbox aplikasi.
+
+4. Transfer & Direct Debit
+- Transfer sesama Neo Bank gratis biaya admin.
+- Transfer antar bank dikenakan biaya Rp 2.500 (BI-FAST) atau Rp 6.500 (Online).
+- Untuk mengatur debit otomatis, masuk ke menu "Auto-Debit", pilih merchant, dan atur tanggal penarikan.
+
+[KATEGORI: KARTU & ATM]
+5. Masalah Kartu ATM (Card Issues)
+- Kartu Hilang/Tertelan: Segera blokir kartu melalui aplikasi menu "Pengaturan Kartu" > "Blokir Sementara" atau hubungi Call Center 1500-123.
+- Kartu Rusak: Kunjungi cabang terdekat untuk penggantian kartu instan (biaya ganti kartu Rp 20.000).
+
+6. Limit Penarikan & Setor Tunai
+- Limit tarik tunai harian: Silver (Rp 5 Juta), Gold (Rp 10 Juta), Platinum (Rp 20 Juta).
+- Setor Tunai (Cash Deposit): Dapat dilakukan di mesin CRM (Cash Recycling Machine) Neo Bank 24 jam tanpa biaya.
+
+[KATEGORI: APLIKASI & KEAMANAN]
+7. Masalah Aplikasi (App Error)
+Jika aplikasi tidak bisa dibuka atau error:
+- Pastikan koneksi internet stabil.
+- Cek apakah ada update versi terbaru di PlayStore/AppStore.
+- Jangan pernah memberikan OTP atau PIN kepada siapa pun, termasuk petugas bank.
+
+8. Akun Dibekukan (Freeze Account)
+Jika akun Anda terblokir karena salah PIN 3x:
+- Reset PIN bisa dilakukan di menu "Lupa PIN" pada halaman login aplikasi dengan verifikasi wajah (Face ID).
+- Jika diblokir karena aktivitas mencurigakan, harap datang ke kantor cabang dengan membawa KTP dan Buku Tabungan.
+
+[KATEGORI: PINJAMAN & PRODUK LAIN]
+9. Pinjaman Bisnis (Business Loan)
+Neo Bank menawarkan Kredit Modal Kerja untuk UMKM:
+- Plafon hingga Rp 500 Juta.
+- Bunga kompetitif mulai 0.75% per bulan.
+- Syarat: Usaha berjalan min. 2 tahun dan memiliki SIUP/NIB. Pengajuan bisa via aplikasi menu "Pinjaman".
+
+10. Akun Gabungan (Joint Account)
+Pembukaan rekening gabungan (Joint Account) hanya dapat dilakukan di kantor cabang. Kedua belah pihak wajib hadir membawa e-KTP dan NPWP.
+
+[KATEGORI: UMUM]
+11. Ganti Alamat (Address Change)
+Perubahan data alamat domisili dapat dilakukan via aplikasi:
+- Masuk ke menu "Profil" > "Data Diri".
+- Pilih "Ubah Alamat" dan upload foto KTP terbaru jika alamat KTP juga berubah.
+
+12. Penggunaan di Luar Negeri (Abroad)
+Kartu Debit Neo Bank berlogo VISA/Mastercard dapat digunakan di luar negeri. Pastikan fitur "Transaksi Internasional" sudah diaktifkan di menu "Pengaturan Kartu" sebelum berangkat.
