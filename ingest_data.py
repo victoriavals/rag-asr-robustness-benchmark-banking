@@ -1,172 +1,90 @@
-"""
-Data Ingestion Script for the Dual-Mode RAG Application.
-
-This script loads text documents, chunks them, generates embeddings,
-and upserts the data into the Qdrant vector database.
-
-Usage:
-    python ingest_data.py
-"""
-
+"""Stage and validate a knowledge base before atomically activating its alias."""
+import argparse
+import math
+import sys
 import uuid
+from numbers import Real
 from pathlib import Path
-
+from collections.abc import Callable
 from qdrant_client.http import models
-
-from src.config import settings
-from src.openai_services import get_embedding
-from src.vector_db import recreate_collection, upsert_points
+from src.config import PROJECT_ROOT, get_settings
+from src.knowledge_base import prepare_chunks
+from src.sumopod_services import get_embedding
+from src.vector_db import activate_collection, create_collection, get_client, upsert_points
 
 
 def load_text_file(file_path: str | Path) -> str:
-    """
-    Load text content from a file.
-
-    Params:
-        file_path (str | Path): The path to the text file.
-
-    Returns:
-        str: The content of the text file.
-
-    Raises:
-        FileNotFoundError: If the file does not exist.
-    """
-    path: Path = Path(file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
-
-    with open(path, "r", encoding="utf-8") as f:
-        content: str = f.read()
-
-    return content
+    return Path(file_path).read_text(encoding='utf-8-sig')
 
 
-def chunk_text(text: str, separator: str = "\n\n") -> list[str]:
-    """
-    Split text into chunks based on a separator.
-
-    Filters out empty chunks and strips whitespace from each chunk.
-
-    Params:
-        text (str): The text to split into chunks.
-        separator (str): The separator to split on. Default is double newline.
-
-    Returns:
-        list[str]: A list of non-empty text chunks.
-    """
-    raw_chunks: list[str] = text.split(separator)
-
-    # Filter empty chunks and strip whitespace
-    chunks: list[str] = [
-        chunk.strip()
-        for chunk in raw_chunks
-        if chunk.strip()
-    ]
-
-    return chunks
+def chunk_text(text: str, separator: str = '\n\n') -> list[str]:
+    if not separator:
+        raise ValueError('separator cannot be empty')
+    return [chunk.strip() for chunk in text.split(separator) if chunk.strip()]
 
 
-def create_points(chunks: list[str]) -> list[models.PointStruct]:
-    """
-    Create Qdrant PointStruct objects from text chunks.
-
-    Generates embeddings for each chunk and creates points with
-    unique IDs and text payloads.
-
-    Params:
-        chunks (list[str]): A list of text chunks to embed.
-
-    Returns:
-        list[models.PointStruct]: A list of PointStruct objects ready
-            for upserting into Qdrant.
-    """
-    points: list[models.PointStruct] = []
-
-    for i, chunk in enumerate(chunks):
-        print(f"Embedding chunk {i + 1}/{len(chunks)}...")
-
-        # Generate embedding for the chunk
-        vector: list[float] = get_embedding(chunk)
-
-        # Create a unique ID for the point
-        point_id: str = str(uuid.uuid4())
-
-        # Create the point with text payload
-        point: models.PointStruct = models.PointStruct(
-            id=point_id,
-            vector=vector,
-            payload={"text": chunk, "chunk_index": i},
-        )
-
-        points.append(point)
-
+def create_points(chunks: list[dict] | list[str], embedding_fn: Callable | None = None) -> list[models.PointStruct]:
+    cfg = get_settings()
+    embed = embedding_fn or get_embedding
+    points = []
+    if not chunks:
+        raise ValueError('Knowledge base contains no usable sections')
+    if isinstance(chunks[0], str):
+        chunks = prepare_chunks('\n\n'.join(chunks))
+    for chunk in chunks:
+        vector = embed(chunk['text'])
+        if (not isinstance(vector, (list, tuple)) or len(vector) != cfg.embedding_dimensions
+                or not all(isinstance(x, Real) and not isinstance(x, bool) and math.isfinite(x) for x in vector)
+                or not any(vector)):
+            raise ValueError('Embedding dimension or values do not match the configured schema')
+        payload = {key: value for key, value in chunk.items() if key != 'id'}
+        payload.update(embedding_model=cfg.embedding_model, embedding_dimensions=cfg.embedding_dimensions,
+                       embedding_base_url=cfg.provider_address('embedding'))
+        points.append(models.PointStruct(id=chunk['id'], vector=vector, payload=payload))
     return points
 
 
-def ingest_document(file_path: str | Path) -> int:
-    """
-    Ingest a document into the Qdrant vector database.
-
-    Loads the document, chunks it, generates embeddings, and upserts
-    the points into the configured Qdrant collection.
-
-    Params:
-        file_path (str | Path): The path to the document to ingest.
-
-    Returns:
-        int: The number of chunks ingested.
-    """
-    collection_name: str = settings.qdrant_collection
-
-    print(f"Loading document: {file_path}")
-    text: str = load_text_file(file_path)
-
-    print("Chunking document...")
-    chunks: list[str] = chunk_text(text)
-    print(f"Created {len(chunks)} chunks")
-
-    print(f"Recreating collection: {collection_name}")
-    recreate_collection(collection_name)
-
-    print("Creating embeddings and points...")
-    points: list[models.PointStruct] = create_points(chunks)
-
-    print(f"Upserting {len(points)} points into Qdrant...")
-    upsert_points(collection_name, points)
-
-    print("Ingestion complete!")
-    return len(chunks)
+def ingest_document(file_path: str | Path, *, embedding_fn: Callable | None = None,
+                    collection_name: str | None = None) -> int:
+    cfg = get_settings()
+    path = Path(file_path)
+    text = load_text_file(path)
+    chunks = prepare_chunks(text, source_name=path.name)
+    # Finish all embedding work before creating or modifying database state.
+    points = create_points(chunks, embedding_fn=embedding_fn)
+    logical = collection_name or cfg.qdrant_collection
+    kb_version = chunks[0]['kb_version']
+    staged = f'{logical}__{kb_version[:12]}_{uuid.uuid4().hex[:8]}'
+    create_collection(staged, vector_size=cfg.embedding_dimensions,
+        metadata={'kb_version': kb_version, 'embedding_model': cfg.embedding_model,
+                  'embedding_base_url': cfg.provider_address('embedding'),
+                  'embedding_dimensions': cfg.embedding_dimensions,
+                  'source': path.name, 'chunk_count': len(points)})
+    # Failed staging collections are retained for inspection. Never remove an
+    # active collection after an ambiguous server/alias-update failure.
+    upsert_points(staged, points)
+    actual = get_client().count(collection_name=staged, exact=True).count
+    if actual != len(points):
+        raise RuntimeError('Staged point count differs from the prepared knowledge base')
+    activate_collection(logical, staged)
+    print(f'Activated {len(points)} sections through {logical}__active; previous collections retained.')
+    return len(points)
 
 
-def main() -> None:
-    """
-    Main entry point for the ingestion script.
-
-    Ingests the bank policy document into the vector database.
-
-    Params:
-        None
-
-    Returns:
-        None
-    """
-    # Path to the bank policy document
-    data_file: Path = Path("data/bank_policy.txt")
-
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('file', nargs='?', default=str(PROJECT_ROOT / 'data' / 'bank_policy.txt'))
+    args = parser.parse_args(argv)
     try:
-        num_chunks: int = ingest_document(data_file)
-        print(f"\nSuccessfully ingested {num_chunks} chunks into Qdrant!")
-        print(f"Collection: {settings.qdrant_collection}")
-        print(f"Qdrant URL: {settings.qdrant_url}")
-
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        print("Please ensure the data file exists.")
-
-    except Exception as e:
-        print(f"Ingestion failed: {e}")
-        raise
+        ingest_document(args.file)
+    except (OSError, ValueError, RuntimeError):
+        print('Ingestion failed. Check the input, service configuration, and staging collection. Active data was not deleted.', file=sys.stderr)
+        return 1
+    except Exception:
+        print('Ingestion failed during a service request. Check credentials and service availability; existing collections were retained.', file=sys.stderr)
+        return 1
+    return 0
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    raise SystemExit(main())
